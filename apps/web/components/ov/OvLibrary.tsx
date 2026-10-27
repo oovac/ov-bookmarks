@@ -209,6 +209,11 @@ export default function OvLibrary() {
           cursor,
           limit: 40,
           unrated: filter.rating === "none" || undefined,
+          ...(filter.rating === "bad"
+            ? { ratingMin: 1, ratingMax: 2 }
+            : filter.rating === "good"
+              ? { ratingMin: 4, ratingMax: 5 }
+              : {}),
           ...(Number(filter.rating)
             ? {
                 ratingMin: Number(filter.rating),
@@ -583,6 +588,8 @@ export default function OvLibrary() {
             >
               <option value="">Любая</option>
               <option value="none">Без оценки</option>
+              <option value="bad">Плохие · 1–2</option>
+              <option value="good">Хорошие · 4–5</option>
               {[1, 2, 3, 4, 5].map((n) => (
                 <option key={n} value={n}>
                   {n} из 5
@@ -1491,32 +1498,65 @@ function Inspector({
             >
               Пустой слот
             </Button>
+            {busy && (
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() =>
+                  request("assessmentCancel", { bookmarkId })
+                    .then(() => setSaved(false))
+                    .catch((e) => reportError(e.message))
+                }
+              >
+                Отменить оценку
+              </Button>
+            )}
           </div>
         </form>
         <ul className="mt-4 divide-y">
-          {assessments.map((a) => (
-            <li key={a.id} className="py-3 text-sm">
-              <p className="font-medium">
-                {a.task}{" "}
-                <span className="font-normal text-muted-foreground">
-                  {a.score
-                    ? `${a.score}/5`
-                    : a.status === "empty"
-                      ? "Ожидает оценки"
-                      : a.status === "failed"
-                        ? "Ошибка"
-                        : a.status === "running"
-                          ? "Выполняется"
-                          : ""}
-                </span>
-              </p>
-              <p className="mt-1">{a.comment || a.errorCode}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {a.provider} {a.model} · {dateLabel(a.createdAt)}
-              </p>
-            </li>
-          ))}
+          {assessments
+            .filter(
+              (a, index, all) =>
+                all.findIndex((b) => b.task === a.task) === index,
+            )
+            .map((a) => (
+              <li key={a.id} className="py-3 text-sm">
+                <p className="font-medium">
+                  {a.task}{" "}
+                  <span className="font-normal text-muted-foreground">
+                    {a.score
+                      ? `${a.score}/5`
+                      : a.status === "empty"
+                        ? "Ожидает оценки"
+                        : a.status === "failed"
+                          ? "Ошибка"
+                          : a.status === "running"
+                            ? "Выполняется"
+                            : ""}
+                  </span>
+                </p>
+                <p className="mt-1">{a.comment || a.errorCode}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {a.provider} {a.model} · {dateLabel(a.createdAt)}
+                </p>
+              </li>
+            ))}
         </ul>
+        {assessments.length > 0 && (
+          <details className="mt-3">
+            <summary className="cursor-pointer text-sm">
+              История всех оценок · {assessments.length}
+            </summary>
+            <ul className="mt-2 space-y-2 text-xs">
+              {assessments.map((a) => (
+                <li key={a.id}>
+                  {a.task} · {a.score || a.status} · {a.comment || a.errorCode}{" "}
+                  · {dateLabel(a.createdAt)}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
       </section>
       <details className="border-t pt-4">
         <summary className="cursor-pointer text-sm font-semibold">

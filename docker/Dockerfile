@@ -245,3 +245,4 @@ ENTRYPOINT ["node", "index.js"]
 
 # Railway builds the last stage by default: serve web, workers and migrations.
 FROM aio AS railway
+COPY scripts/ov-sqlite-backup.mjs /app/scripts/ov-sqlite-backup.mjs

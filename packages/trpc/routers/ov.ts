@@ -18,7 +18,6 @@ import {
 } from "@karakeep/db/schema";
 import { BookmarkTypes } from "@karakeep/shared/types/bookmarks";
 import serverConfig from "@karakeep/shared/config";
-import logger from "@karakeep/shared/logger";
 import { normalizeOvUrl } from "@karakeep/shared/ov/url";
 import {
   createCallerFactory,
@@ -113,6 +112,7 @@ export const ovListInput = z
   .default({ sort: "newest", limit: 40 });
 
 // A single web replica is intentional. Bound memory; never put URL/content in logs.
+const assessmentControllers = new Map<string, AbortController>();
 const buckets = new Map<string, { at: number; count: number }>();
 const ovProcedure = createScopedAuthedProcedure("bookmarks").use(
   async (opts) => {
@@ -130,13 +130,13 @@ const ovProcedure = createScopedAuthedProcedure("bookmarks").use(
     if (++bucket.count > (opts.type === "query" ? 240 : 120))
       throw new TRPCError({ code: "TOO_MANY_REQUESTS" });
     const result = await opts.next();
-    logger.info(
+    process.stdout.write(
       JSON.stringify({
         event: "ov.api",
         userId: opts.ctx.user.id,
         path: opts.path,
         ok: result.ok,
-      }),
+      }) + "\n",
     );
     return result;
   },
@@ -171,6 +171,7 @@ function requireWorkspace(ctx: AuthedContext, workspaceId: string) {
 const totalOpens = sql<number>`(select count(*) from ov_open_events e where e.bookmark_id = ${bookmarks.id})`;
 const opens7d = sql<number>`(select count(*) from ov_open_events e where e.bookmark_id = ${bookmarks.id} and e.opened_at >= unixepoch()-604800)`;
 const opens30d = sql<number>`(select count(*) from ov_open_events e where e.bookmark_id = ${bookmarks.id} and e.opened_at >= unixepoch()-2592000)`;
+const domain = sql<string>`lower(substr(substr(${bookmarkLinks.url},instr(${bookmarkLinks.url},'://')+3),1,instr(substr(${bookmarkLinks.url},instr(${bookmarkLinks.url},'://')+3)||'/','/')-1))`;
 const lastOpened = sql<
   number | null
 >`(select max(e.opened_at) from ov_open_events e where e.bookmark_id = ${bookmarks.id})`;
@@ -332,36 +333,33 @@ async function addLink(ctx: AuthedContext, input: z.infer<typeof ovAddInput>) {
     : 0;
   return { ...getLink(ctx, bookmarkId), alreadyExists, attached };
 }
-function patch(ctx: AuthedContext, input: z.infer<typeof ovUpdateInput>) {
+async function patch(ctx: AuthedContext, input: z.infer<typeof ovUpdateInput>) {
   requireLink(ctx, input.bookmarkId);
-  ctx.db.transaction((tx) => {
-    const { bookmarkId, title, description, archived, favourited, ...meta } =
-      input;
-    const nativeUpdate = {
+  const { bookmarkId, title, description, archived, favourited, ...meta } =
+    input;
+  if (
+    title !== undefined ||
+    description !== undefined ||
+    archived !== undefined ||
+    favourited !== undefined
+  )
+    await native(ctx).updateBookmark({
+      bookmarkId,
       ...(title !== undefined ? { title } : {}),
+      ...(description !== undefined ? { description } : {}),
       ...(archived !== undefined ? { archived } : {}),
       ...(favourited !== undefined ? { favourited } : {}),
-      modifiedAt: new Date(),
-    };
-    tx.update(bookmarks)
-      .set(nativeUpdate)
-      .where(eq(bookmarks.id, bookmarkId))
+    });
+  if (Object.keys(meta).length)
+    ctx.db
+      .insert(ovLinkMeta)
+      .values({ bookmarkId, userId: ctx.user.id, ...meta })
+      .onConflictDoUpdate({
+        target: ovLinkMeta.bookmarkId,
+        set: { ...meta, updatedAt: new Date() },
+      })
       .run();
-    if (description !== undefined)
-      tx.update(bookmarkLinks)
-        .set({ description })
-        .where(eq(bookmarkLinks.id, bookmarkId))
-        .run();
-    if (Object.keys(meta).length)
-      tx.insert(ovLinkMeta)
-        .values({ bookmarkId, userId: ctx.user.id, ...meta })
-        .onConflictDoUpdate({
-          target: ovLinkMeta.bookmarkId,
-          set: { ...meta, updatedAt: new Date() },
-        })
-        .run();
-  });
-  return getLink(ctx, input.bookmarkId);
+  return getLink(ctx, bookmarkId);
 }
 
 export const ovAppRouter = router({
@@ -455,7 +453,7 @@ export const ovAppRouter = router({
       title: [
         sql`coalesce(${bookmarks.title},${bookmarkLinks.title},${bookmarkLinks.url}) collate nocase asc`,
       ],
-      domain: [asc(bookmarkLinks.url)],
+      domain: [asc(domain)],
       priority: [desc(ovLinkMeta.reviewPriority)],
       rating: [desc(ovLinkMeta.userRating)],
       ratingAsc: [
@@ -474,11 +472,13 @@ export const ovAppRouter = router({
       input.limit + 1,
       offset,
       order[
-        view === "recent"
-          ? "lastOpened"
-          : view === "frequent"
-            ? "opens30d"
-            : input.sort
+        view === "review"
+          ? "priority"
+          : view === "recent"
+            ? "lastOpened"
+            : view === "frequent"
+              ? "opens30d"
+              : input.sort
       ],
     );
     const total = ctx.db
@@ -511,12 +511,10 @@ export const ovAppRouter = router({
         patch: ovUpdateInput.omit({ bookmarkId: true }),
       }),
     )
-    .mutation(({ ctx, input }) => {
+    .mutation(async ({ ctx, input }) => {
       for (const bid of input.bookmarkIds) requireLink(ctx, bid);
-      ctx.db.transaction(() => {
-        for (const bookmarkId of input.bookmarkIds)
-          patch(ctx, { bookmarkId, ...input.patch });
-      });
+      for (const bookmarkId of input.bookmarkIds)
+        await patch(ctx, { bookmarkId, ...input.patch });
       return { updated: input.bookmarkIds.length };
     }),
   bulkImport: ovProcedure
@@ -818,6 +816,13 @@ export const ovAppRouter = router({
         })
         .returning()
         .get();
+      const controller = new AbortController();
+      assessmentControllers.set(row.id, controller);
+      const captured = ctx.db
+        .select({ html: bookmarkLinks.htmlContent })
+        .from(bookmarkLinks)
+        .where(eq(bookmarkLinks.id, input.bookmarkId))
+        .get()?.html;
       try {
         if (!process.env.CEREBRAS_API_KEY)
           throw new Error("provider_not_configured");
@@ -829,7 +834,10 @@ export const ovAppRouter = router({
               Authorization: `Bearer ${process.env.CEREBRAS_API_KEY}`,
               "Content-Type": "application/json",
             },
-            signal: AbortSignal.timeout(25000),
+            signal: AbortSignal.any([
+              controller.signal,
+              AbortSignal.timeout(25000),
+            ]),
             body: JSON.stringify({
               model,
               temperature: 0.1,
@@ -849,6 +857,9 @@ export const ovAppRouter = router({
                       title: link.title,
                       url: link.url,
                       description: link.description?.slice(0, 6000),
+                      extractedText: captured
+                        ?.replace(/<[^>]*>/g, " ")
+                        .slice(0, 12000),
                     },
                   }),
                 },
@@ -875,19 +886,51 @@ export const ovAppRouter = router({
           .update(ovAssessments)
           .set({
             status: "failed",
-            errorCode: message.startsWith("provider_")
-              ? message.slice(0, 80)
-              : "invalid_response_or_timeout",
+            errorCode: controller.signal.aborted
+              ? "cancelled"
+              : message.startsWith("provider_")
+                ? message.slice(0, 80)
+                : "invalid_response_or_timeout",
             completedAt: new Date(),
           })
           .where(eq(ovAssessments.id, row.id))
           .run();
       }
+      assessmentControllers.delete(row.id);
       return ctx.db
         .select()
         .from(ovAssessments)
         .where(eq(ovAssessments.id, row.id))
         .get()!;
+    }),
+  assessmentCancel: ovProcedure
+    .input(z.object({ bookmarkId: id }))
+    .mutation(({ ctx, input }) => {
+      requireLink(ctx, input.bookmarkId);
+      const running = ctx.db
+        .select()
+        .from(ovAssessments)
+        .where(
+          and(
+            eq(ovAssessments.userId, ctx.user.id),
+            eq(ovAssessments.bookmarkId, input.bookmarkId),
+            eq(ovAssessments.status, "running"),
+          ),
+        )
+        .all();
+      for (const row of running) {
+        assessmentControllers.get(row.id)?.abort();
+        ctx.db
+          .update(ovAssessments)
+          .set({
+            status: "failed",
+            errorCode: "cancelled",
+            completedAt: new Date(),
+          })
+          .where(eq(ovAssessments.id, row.id))
+          .run();
+      }
+      return { cancelled: running.length };
     }),
   capabilities: ovProcedure.query(() => ({
     version: "0.1.0",

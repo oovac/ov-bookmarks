@@ -1,3 +1,6 @@
+import { TRPCError } from "@trpc/server";
+import { getHTTPStatusCodeFromError } from "@trpc/server/http";
+import { HTTPException } from "hono/http-exception";
 import { timingSafeEqual } from "node:crypto";
 import { users } from "@karakeep/db/schema";
 import { User } from "@karakeep/trpc/models/users";
@@ -89,6 +92,7 @@ const operations = {
       kind: z.enum(["topic", "case"]),
       name: z.string(),
       triggerDescription: z.string().optional(),
+      comment: z.string().max(2000).optional(),
     }),
     read: false,
   },
@@ -116,6 +120,10 @@ const operations = {
   assessmentList: { schema: z.object({ bookmarkId: z.string() }), read: true },
   assessmentPrepare: {
     schema: z.object({ bookmarkId: z.string(), task: z.string() }),
+    read: false,
+  },
+  assessmentCancel: {
+    schema: z.object({ bookmarkId: z.string() }),
     read: false,
   },
   assessmentRun: {
@@ -264,6 +272,75 @@ app.all("/mcp", async (c) => {
       },
     );
   }
+  const nativeTools: [
+    string,
+    z.ZodObject<z.ZodRawShape>,
+    boolean,
+    (args: Record<string, unknown>) => Promise<unknown>,
+  ][] = [
+    ["get-lists", z.object({}), true, () => c.var.api.lists.list()],
+    ["get-tags", z.object({}), true, () => c.var.api.tags.list()],
+    [
+      "create-list",
+      z.object({ name: z.string() }),
+      false,
+      (a) => c.var.api.lists.create({ name: String(a.name), icon: "folder" }),
+    ],
+    [
+      "create-bookmark",
+      ovAddInput,
+      false,
+      (a) => c.var.api.ov.add(ovAddInput.parse(a)),
+    ],
+    [
+      "get-bookmark-content",
+      z.object({ bookmarkId: z.string() }),
+      true,
+      (a) =>
+        c.var.api.bookmarks.getBookmarkReadableContent({
+          bookmarkId: String(a.bookmarkId),
+          format: "text",
+        }),
+    ],
+    [
+      "update-bookmark",
+      ovUpdateInput,
+      false,
+      (a) => c.var.api.ov.update(ovUpdateInput.parse(a)),
+    ],
+    [
+      "search-bookmarks",
+      z.object({ query: z.string().optional() }),
+      true,
+      async () => ({
+        error: "SearchUnavailable",
+        message:
+          "Meilisearch is disabled; use ov_bookmarks_list for SQL metadata filters",
+      }),
+    ],
+  ];
+  for (const [name, inputSchema, read, call] of nativeTools)
+    server.registerTool(
+      name,
+      {
+        description: `Karakeep compatible ${name}`,
+        inputSchema,
+        annotations: { readOnlyHint: read, destructiveHint: false },
+      },
+      async (args) => {
+        try {
+          return {
+            content: [{ type: "text", text: JSON.stringify(await call(args)) }],
+            ...(name === "search-bookmarks" ? { isError: true } : {}),
+          };
+        } catch {
+          return {
+            isError: true,
+            content: [{ type: "text", text: "Request denied or invalid" }],
+          };
+        }
+      },
+    );
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
@@ -274,5 +351,21 @@ app.all("/mcp", async (c) => {
   } finally {
     await server.close();
   }
+});
+app.onError((error, _c) => {
+  const status =
+    error instanceof TRPCError
+      ? getHTTPStatusCodeFromError(error)
+      : error instanceof HTTPException
+        ? error.status
+        : error instanceof z.ZodError
+          ? 400
+          : 500;
+  return new Response(
+    JSON.stringify({
+      error: status >= 500 ? "Internal server error" : error.message,
+    }),
+    { status, headers: { "Content-Type": "application/json" } },
+  );
 });
 export default app;
