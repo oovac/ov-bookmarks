@@ -1,3 +1,5 @@
+import { normalizeOvUrl } from "@karakeep/shared/ov/url";
+import { ovCanonicalLinks } from "@karakeep/db/schema";
 import { experimental_trpcMiddleware, TRPCError } from "@trpc/server";
 import { and, eq, gt, inArray, like, lt, or } from "drizzle-orm";
 import { z } from "zod";
@@ -129,6 +131,42 @@ export const ensureBookmarkAccess = experimental_trpcMiddleware<{
 });
 
 async function attemptToDedupLink(ctx: AuthedContext, url: string) {
+  const normalizedUrl = normalizeOvUrl(url);
+  const mapped = ctx.db
+    .select()
+    .from(ovCanonicalLinks)
+    .where(
+      and(
+        eq(ovCanonicalLinks.userId, ctx.user.id),
+        eq(ovCanonicalLinks.normalizedUrl, normalizedUrl),
+      ),
+    )
+    .get();
+  if (mapped)
+    return (await Bookmark.fromId(ctx, mapped.bookmarkId, false)).asZBookmark();
+  // Legacy bookmarks are indexed lazily, preserving original URLs.
+  const legacy = ctx.db
+    .select({ id: bookmarkLinks.id, url: bookmarkLinks.url })
+    .from(bookmarkLinks)
+    .innerJoin(bookmarks, eq(bookmarks.id, bookmarkLinks.id))
+    .where(eq(bookmarks.userId, ctx.user.id))
+    .all();
+  const found = legacy.find((item) => {
+    try {
+      return normalizeOvUrl(item.url) === normalizedUrl;
+    } catch {
+      return false;
+    }
+  });
+  if (found) {
+    ctx.db
+      .insert(ovCanonicalLinks)
+      .values({ userId: ctx.user.id, normalizedUrl, bookmarkId: found.id })
+      .onConflictDoNothing()
+      .run();
+    return (await Bookmark.fromId(ctx, found.id, false)).asZBookmark();
+  }
+
   const result = await ctx.db
     .select({
       id: bookmarkLinks.id,
@@ -391,6 +429,13 @@ export const bookmarksAppRouter = router({
                 })
                 .returning()
                 .all()[0];
+              tx.insert(ovCanonicalLinks)
+                .values({
+                  userId: ctx.user.id,
+                  normalizedUrl: normalizeOvUrl(input.url),
+                  bookmarkId: bookmark.id,
+                })
+                .run();
               if (input.precrawledArchiveId) {
                 tx.update(assets)
                   .set({
@@ -585,6 +630,17 @@ export const bookmarksAppRouter = router({
           dateModified: Date | null;
         }> = {};
         if (input.url) {
+          const normalizedUrl = normalizeOvUrl(input.url);
+          tx.delete(ovCanonicalLinks)
+            .where(eq(ovCanonicalLinks.bookmarkId, input.bookmarkId))
+            .run();
+          tx.insert(ovCanonicalLinks)
+            .values({
+              userId: ctx.user.id,
+              normalizedUrl,
+              bookmarkId: input.bookmarkId,
+            })
+            .run();
           linkUpdateData.url = input.url.trim();
         }
         if (input.description !== undefined) {

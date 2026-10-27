@@ -1142,6 +1142,9 @@ importers:
 
   packages/api:
     dependencies:
+      '@modelcontextprotocol/server':
+        specifier: ^2.0.0
+        version: 2.0.0(zod@4.2.0)
       '@hono/otel':
         specifier: ^1.1.1
         version: 1.1.1(hono@4.13.8)

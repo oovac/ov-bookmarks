@@ -58,6 +58,11 @@ export default async function Dashboard({
   const items = (t: TFunction) =>
     [
       {
+        name: "OV Bookmarks",
+        icon: <Home size={18} />,
+        path: "/dashboard/ov",
+      },
+      {
         name: t("common.home"),
         icon: <Home size={18} />,
         path: "/dashboard/bookmarks",

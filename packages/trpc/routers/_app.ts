@@ -18,7 +18,10 @@ import { tagsAppRouter } from "./tags";
 import { usersAppRouter } from "./users";
 import { webhooksAppRouter } from "./webhooks";
 
+import { ovAppRouter } from "./ov";
+
 export const appRouter = router({
+  ov: ovAppRouter,
   bookmarks: bookmarksAppRouter,
   apiKeys: apiKeysAppRouter,
   users: usersAppRouter,

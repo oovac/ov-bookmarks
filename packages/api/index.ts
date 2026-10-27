@@ -25,6 +25,7 @@ import trpc from "./routes/trpc";
 import users from "./routes/users";
 import version from "./routes/version";
 import webhooks from "./routes/webhooks";
+import ov from "./routes/ov";
 
 const v1 = new Hono<{
   Variables: {
@@ -83,6 +84,7 @@ app
     await next();
   })
   .use(trpcAdapter)
+  .route("/ov", ov)
   .route("/health", health)
   .route("/version", version)
   .route("/trpc", trpc)

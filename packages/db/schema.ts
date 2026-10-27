@@ -1398,3 +1398,183 @@ export const userReadingProgressRelations = relations(
     }),
   }),
 );
+
+// OV extension tables: native bookmarks remain the canonical objects.
+export const ovCanonicalLinks = sqliteTable(
+  "ov_canonical_links",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    normalizedUrl: text("normalized_url").notNull(),
+    bookmarkId: text("bookmark_id")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.normalizedUrl] }),
+    index("ov_canonical_bookmark_idx").on(t.bookmarkId),
+  ],
+);
+
+export const ovLinkMeta = sqliteTable(
+  "ov_link_meta",
+  {
+    bookmarkId: text("bookmark_id")
+      .primaryKey()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    reviewPriority: integer("review_priority"),
+    forCase: integer("for_case", { mode: "boolean" }).notNull().default(false),
+    forFuture: integer("for_future", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    userRating: integer("user_rating"),
+    userComment: text("user_comment"),
+    updatedAt: createdAtField("updated_at"),
+  },
+  (t) => [
+    index("ov_meta_user_priority_idx").on(t.userId, t.reviewPriority),
+    index("ov_meta_user_rating_idx").on(t.userId, t.userRating),
+  ],
+);
+
+export const ovTerms = sqliteTable(
+  "ov_terms",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind", { enum: ["topic", "case"] }).notNull(),
+    name: text("name").notNull(),
+    normalizedName: text("normalized_name").notNull(),
+    triggerDescription: text("trigger_description"),
+    parentId: text("parent_id"),
+    comment: text("comment"),
+  },
+  (t) => [
+    unique("ov_terms_user_kind_name").on(t.userId, t.kind, t.normalizedName),
+  ],
+);
+
+export const ovLinkTerms = sqliteTable(
+  "ov_link_terms",
+  {
+    bookmarkId: text("bookmark_id")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    termId: text("term_id")
+      .notNull()
+      .references(() => ovTerms.id, { onDelete: "cascade" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.bookmarkId, t.termId] }),
+    index("ov_term_links_idx").on(t.termId, t.bookmarkId),
+  ],
+);
+
+export const ovWorkspaces = sqliteTable(
+  "ov_workspaces",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdAt: createdAtField("created_at"),
+  },
+  (t) => [index("ov_workspace_owner_idx").on(t.ownerId)],
+);
+
+export const ovTabCaptures = sqliteTable(
+  "ov_tab_captures",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => ovWorkspaces.id, { onDelete: "cascade" }),
+    label: text("label"),
+    browser: text("browser"),
+    bookmarkIds: text("bookmark_ids", { mode: "json" })
+      .$type<string[]>()
+      .notNull(),
+    capturedAt: createdAtField("captured_at"),
+  },
+  (t) => [index("ov_capture_workspace_idx").on(t.workspaceId, t.capturedAt)],
+);
+
+export const ovWorkspaceLinks = sqliteTable(
+  "ov_workspace_links",
+  {
+    workspaceId: text("workspace_id")
+      .notNull()
+      .references(() => ovWorkspaces.id, { onDelete: "cascade" }),
+    bookmarkId: text("bookmark_id")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    addedAt: createdAtField("added_at"),
+  },
+  (t) => [primaryKey({ columns: [t.workspaceId, t.bookmarkId] })],
+);
+
+export const ovOpenEvents = sqliteTable(
+  "ov_open_events",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    bookmarkId: text("bookmark_id")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    source: text("source").notNull().default("web"),
+    openedAt: createdAtField("opened_at"),
+  },
+  (t) => [
+    index("ov_opens_user_time_idx").on(t.userId, t.openedAt),
+    index("ov_opens_link_time_idx").on(t.bookmarkId, t.openedAt),
+  ],
+);
+
+export const ovAssessments = sqliteTable(
+  "ov_ai_assessments",
+  {
+    id: text("id")
+      .primaryKey()
+      .$defaultFn(() => createId()),
+    userId: text("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    bookmarkId: text("bookmark_id")
+      .notNull()
+      .references(() => bookmarks.id, { onDelete: "cascade" }),
+    task: text("task").notNull(),
+    provider: text("provider"),
+    model: text("model"),
+    promptVersion: text("prompt_version").notNull().default("ov-v1"),
+    score: integer("score"),
+    comment: text("comment"),
+    status: text("status", { enum: ["empty", "running", "complete", "failed"] })
+      .notNull()
+      .default("empty"),
+    errorCode: text("error_code"),
+    createdAt: createdAtField("created_at"),
+    completedAt: integer("completed_at", { mode: "timestamp" }),
+  },
+  (t) => [
+    index("ov_assessment_user_task_idx").on(t.userId, t.task, t.createdAt),
+    index("ov_assessment_link_task_idx").on(t.bookmarkId, t.task, t.createdAt),
+  ],
+);

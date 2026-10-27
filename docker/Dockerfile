@@ -242,3 +242,6 @@ COPY --from=mcp_builder /app/apps/mcp/dist/index.js apps/mcp/index.js
 WORKDIR /app/apps/mcp
 
 ENTRYPOINT ["node", "index.js"]
+
+# Railway builds the last stage by default: serve web, workers and migrations.
+FROM aio AS railway
